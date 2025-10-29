@@ -296478,6 +296478,9 @@ async function downloadAsset(assetId, cookies, downloadPath) {
     const portalDownloadUrl = `https://portal-api.cfx.re/v1/assets/${assetId}/versions/${activeVersion.id}/packs/${packId}/download`;
     core.info(`Downloading asset from ${portalDownloadUrl} ...`);
     const response = await axios_1.default.get(portalDownloadUrl, {
+        headers: {
+            Cookie: cookies
+        },
         responseType: 'stream'
     });
     // Cast response.data to a Readable stream to satisfy the linter.

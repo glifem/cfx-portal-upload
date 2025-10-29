@@ -517,6 +517,9 @@ async function downloadAsset(
   core.info(`Downloading asset from ${portalDownloadUrl} ...`)
 
   const response = await axios.get(portalDownloadUrl, {
+    headers: {
+      Cookie: cookies
+    },
     responseType: 'stream'
   })
 
