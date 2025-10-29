@@ -16,14 +16,14 @@ import {
 import { Readable } from 'stream'
 
 interface AssetVersion {
-  id: number;
-  state: string;
-  packs: VersionPack[];
+  id: number
+  state: string
+  packs: VersionPack[]
 }
 
 interface VersionPack {
-  id: number;
-  game: string;
+  id: number
+  game: string
 }
 
 interface Asset {
@@ -448,10 +448,17 @@ async function waitForAssetReady(
             'Asset state is "invalid", but no errors were found. Waiting...'
           )
         }
-      } else if (foundAsset.state === 'submitted' || foundAsset.state === 'created') {
-        core.info('Asset has successfully been submitted. Waiting for asset to be active...')
+      } else if (
+        foundAsset.state === 'submitted' ||
+        foundAsset.state === 'created'
+      ) {
+        core.info(
+          'Asset has successfully been submitted. Waiting for asset to be active...'
+        )
       } else {
-        throw new Error(`Asset state is '${foundAsset.state}'. Asset is not ready for download.`)
+        throw new Error(
+          `Asset state is '${foundAsset.state}'. Asset is not ready for download.`
+        )
       }
     } else {
       core.info('Asset not found in response. Waiting...')
@@ -477,17 +484,16 @@ async function downloadAsset(
 ): Promise<void> {
   // First, get the real URL from the portal.
   const portalAssetData = `https://portal-api.cfx.re/v1/assets/${assetId}`
-  core.info(`Fetching asset data for version ID and pack ID from ${portalAssetData} ...`)
-
-  const initialResponse = await axios.get<Asset>(
-    portalAssetData,
-    {
-      headers: {
-        Cookie: cookies
-      },
-      responseType: 'json'
-    }
+  core.info(
+    `Fetching asset data for version ID and pack ID from ${portalAssetData} ...`
   )
+
+  const initialResponse = await axios.get<Asset>(portalAssetData, {
+    headers: {
+      Cookie: cookies
+    },
+    responseType: 'json'
+  })
 
   const assetVersions: AssetVersion[] = initialResponse.data.versions
   core.info('Identifying active asset version ...')
