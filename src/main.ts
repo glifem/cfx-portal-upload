@@ -514,9 +514,16 @@ async function downloadAsset(
   const packId = activeVersion.packs[0].id
 
   const portalDownloadUrl = `https://portal-api.cfx.re/v1/assets/${assetId}/versions/${activeVersion.id}/packs/${packId}/download`
-  core.info(`Downloading asset from ${portalDownloadUrl} ...`)
+  core.info(`Grabbing real CDN download URL from ${portalDownloadUrl} ...`)
 
-  const response = await axios.get(portalDownloadUrl, {
+  const cdnDownloadUrl = await axios.get(portalDownloadUrl, {
+    headers: {
+      Cookie: cookies
+    },
+    responseType: 'json'
+  })
+
+  const response = await axios.get(cdnDownloadUrl.data.url, {
     headers: {
       Cookie: cookies
     },
