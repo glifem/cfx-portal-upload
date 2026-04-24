@@ -52,6 +52,7 @@ export async function resolveAssetId(
     `https://portal-api.cfx.re/v1/me/assets?search=${name}&sort=asset.name&direction=asc`,
     {
       headers: {
+        ...getBrowserHeaders(),
         Cookie: cookies
       }
     }
@@ -78,9 +79,33 @@ export async function resolveAssetId(
   )
 }
 
-export function getUrl(type: keyof typeof Urls, id?: string): string {
-  const url = Urls.API + Urls[type]
-  return id ? url.replace('{id}', id) : url
+export function getUrl(
+  type: keyof typeof Urls,
+  id?: string,
+  versionId?: string
+): string {
+  let url: string = Urls.API + Urls[type]
+  if (id) url = url.replace('{id}', id)
+  if (versionId) url = url.replace('{versionId}', versionId)
+  return url
+}
+
+export function getBrowserHeaders(): Record<string, string> {
+  return {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    Accept: 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    Origin: 'https://portal.cfx.re',
+    Referer: 'https://portal.cfx.re/',
+    'sec-ch-ua':
+      '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site'
+  }
 }
 
 type TreeNode = string | Record<string, TreeNode[]> | null

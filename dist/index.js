@@ -296289,7 +296289,7 @@ async function getZipPath(assetName, zipPath, makeZip) {
  * @param assetId
  * @param chunkSize
  * @param cookies
- * @returns {Promise<void>} Resolves when the re-upload process is initiated successfully.
+ * @returns {Promise<string>} Resolves with the new version id.
  * @throws If the re-upload fails due to errors in the response.
  */
 async function startReupload(zipPath, assetId, chunkSize, cookies) {
@@ -296310,6 +296310,8 @@ async function startReupload(zipPath, assetId, chunkSize, cookies) {
         total_size: totalSize
     }, {
         headers: {
+            ...(0, utils_1.getBrowserHeaders)(),
+            'Content-Type': 'application/json',
             Cookie: cookies
         }
     });
@@ -296317,6 +296319,13 @@ async function startReupload(zipPath, assetId, chunkSize, cookies) {
         core.debug(JSON.stringify(reUploadReponse.data.errors));
         throw new Error('Failed to re-upload file. See debug logs for more information.');
     }
+    const versionId = reUploadReponse.data.version_id;
+    if (!versionId) {
+        core.debug(JSON.stringify(reUploadReponse.data));
+        throw new Error('Re-upload response missing version_id. See debug logs for more information.');
+    }
+    core.debug(`Version id: ${versionId}`);
+    return versionId.toString();
 }
 /**
  * Uploads a zip file in chunks to the specified asset.
@@ -296328,7 +296337,7 @@ async function startReupload(zipPath, assetId, chunkSize, cookies) {
  * @throws If the upload fails at any stage.
  */
 async function uploadZip(zipPath, assetId, chunkSize, cookies) {
-    await startReupload(zipPath, assetId, chunkSize, cookies);
+    const versionId = await startReupload(zipPath, assetId, chunkSize, cookies);
     let chunkIndex = 0;
     const stats = (0, fs_1.statSync)(zipPath);
     const totalSize = stats.size;
@@ -296341,26 +296350,31 @@ async function uploadZip(zipPath, assetId, chunkSize, cookies) {
             filename: 'blob',
             contentType: 'application/octet-stream'
         });
-        await axios_1.default.post((0, utils_1.getUrl)('UPLOAD_CHUNK', assetId), form, {
+        await axios_1.default.post((0, utils_1.getUrl)('UPLOAD_CHUNK', assetId, versionId), form, {
             headers: {
+                ...(0, utils_1.getBrowserHeaders)(),
                 ...form.getHeaders(),
                 Cookie: cookies
-            }
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity
         });
         core.info(`Uploaded chunk ${chunkIndex + 1}/${chunkCount}`);
         chunkIndex++;
     }
-    await completeUpload(assetId, cookies);
+    await completeUpload(assetId, versionId, cookies);
 }
 /**
  * Completes the upload process.
  * @param assetId
+ * @param versionId
  * @param cookies
  * @returns {Promise<void>} Resolves when the upload is complete.
  */
-async function completeUpload(assetId, cookies) {
-    await axios_1.default.post((0, utils_1.getUrl)('COMPLETE_UPLOAD', assetId), {}, {
+async function completeUpload(assetId, versionId, cookies) {
+    await axios_1.default.post((0, utils_1.getUrl)('COMPLETE_UPLOAD', assetId, versionId), {}, {
         headers: {
+            ...(0, utils_1.getBrowserHeaders)(),
             Cookie: cookies
         }
     });
@@ -296382,8 +296396,8 @@ var Urls;
     Urls["API"] = "https://portal-api.cfx.re/v1/";
     Urls["SSO"] = "auth/discourse?return=";
     Urls["REUPLOAD"] = "assets/{id}/re-upload";
-    Urls["UPLOAD_CHUNK"] = "assets/{id}/upload-chunk";
-    Urls["COMPLETE_UPLOAD"] = "assets/{id}/complete-upload";
+    Urls["UPLOAD_CHUNK"] = "assets/{id}/versions/{versionId}/upload-chunk";
+    Urls["COMPLETE_UPLOAD"] = "assets/{id}/versions/{versionId}/complete-upload";
 })(Urls || (exports.Urls = Urls = {}));
 
 
@@ -296434,6 +296448,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.preparePuppeteer = preparePuppeteer;
 exports.resolveAssetId = resolveAssetId;
 exports.getUrl = getUrl;
+exports.getBrowserHeaders = getBrowserHeaders;
 exports.getEnv = getEnv;
 exports.zipAsset = zipAsset;
 exports.deleteIfExists = deleteIfExists;
@@ -296479,6 +296494,7 @@ async function resolveAssetId(name, cookies) {
     core.debug(`Searching asset id for ${name}...`);
     const search = await axios_1.default.get(`https://portal-api.cfx.re/v1/me/assets?search=${name}&sort=asset.name&direction=asc`, {
         headers: {
+            ...getBrowserHeaders(),
             Cookie: cookies
         }
     });
@@ -296496,9 +296512,28 @@ async function resolveAssetId(name, cookies) {
     core.debug(JSON.stringify(search.data));
     throw new Error(`Failed to find asset id for "${name}" exact match. See debug logs for more information.`);
 }
-function getUrl(type, id) {
-    const url = types_1.Urls.API + types_1.Urls[type];
-    return id ? url.replace('{id}', id) : url;
+function getUrl(type, id, versionId) {
+    let url = types_1.Urls.API + types_1.Urls[type];
+    if (id)
+        url = url.replace('{id}', id);
+    if (versionId)
+        url = url.replace('{versionId}', versionId);
+    return url;
+}
+function getBrowserHeaders() {
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+        Accept: 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Origin: 'https://portal.cfx.re',
+        Referer: 'https://portal.cfx.re/',
+        'sec-ch-ua': '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site'
+    };
 }
 function buildTree(currentPath) {
     const stats = fs_1.default.statSync(currentPath);
