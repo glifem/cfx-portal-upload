@@ -3,7 +3,7 @@ import puppeteer, { Browser, Page } from 'puppeteer'
 import FormData from 'form-data'
 import axios from 'axios'
 import { createReadStream, statSync, createWriteStream } from 'fs'
-import { basename } from 'path'
+import { basename, extname } from 'path'
 import { ReUploadResponse, SSOResponseBody } from './types'
 import {
   deleteIfExists,
@@ -286,7 +286,7 @@ async function startReupload(
     {
       chunk_count: chunkCount,
       chunk_size: chunkSize,
-      name: originalFileName,
+      name: basename(originalFileName, extname(originalFileName)),
       original_file_name: originalFileName,
       total_size: totalSize
     },
