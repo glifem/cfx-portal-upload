@@ -1,7 +1,9 @@
 import { Browser, getInstalledBrowsers, install } from '@puppeteer/browsers'
 import { SearchResponse, Urls } from './types'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { join } from 'path'
+import { execSync } from 'child_process'
+import { mkdtempSync } from 'fs'
 
 import * as core from '@actions/core'
 import axios from 'axios'
@@ -180,7 +182,7 @@ export async function zipAsset(assetName: string): Promise<string> {
 }
 
 export function deleteIfExists(_path: string): void {
-  _path = path.join(getEnv('GITHUB_WORKSPACE'), _path)
+  _path = path.join(getWorkspace(), _path)
 
   try {
     if (fs.existsSync(_path)) {
@@ -198,4 +200,129 @@ export function deleteIfExists(_path: string): void {
   } catch (error) {
     core.debug(`Skipping ${_path} deletion due to error: ${error as string}`)
   }
+}
+
+function getWorkspace(): string {
+  return process.env.GITHUB_WORKSPACE ?? process.cwd()
+}
+
+export function getShortSha(): string {
+  const sha = process.env.GITHUB_SHA
+  if (sha && sha.length >= 7) {
+    return sha.slice(0, 7)
+  }
+
+  return Date.now().toString(36)
+}
+
+export function parseManifestVersion(content: string): string | null {
+  const match = content.match(/^\s*version\s+['"]([^'"]+)['"]/m)
+  return match?.[1] ?? null
+}
+
+export function setManifestVersion(content: string, version: string): string {
+  return content.replace(
+    /^(\s*version\s+)(['"])([^'"]+)(['"])/m,
+    `$1$2${version}$4`
+  )
+}
+
+export function resolveBaseVersion(raw: string, shortSha: string): string {
+  let base = raw
+
+  if (base.includes('__BUILD_VERSION__')) {
+    base = base.replace(/__BUILD_VERSION__/g, shortSha)
+  }
+
+  if (base.includes('{commit}')) {
+    base = base.replace(/\{commit\}/g, shortSha)
+  }
+
+  return base.replace(/-[0-9a-f]{7,40}$/i, '')
+}
+
+export function buildUploadVersion(
+  rawVersion: string,
+  shortSha: string
+): string {
+  const base = resolveBaseVersion(rawVersion, shortSha)
+
+  if (base.includes(shortSha)) {
+    return base
+  }
+
+  return `${base}-${shortSha}`
+}
+
+export function readManifestVersion(manifestPath: string): string {
+  const fullPath = path.isAbsolute(manifestPath)
+    ? manifestPath
+    : path.join(getWorkspace(), manifestPath)
+  const content = fs.readFileSync(fullPath, 'utf8')
+  const version = parseManifestVersion(content)
+
+  if (!version) {
+    throw new Error(`No version field in ${manifestPath}`)
+  }
+
+  return version
+}
+
+export function patchZipManifest(
+  zipPath: string,
+  zipManifestPath: string,
+  version: string
+): void {
+  const tempDir = mkdtempSync(join(tmpdir(), 'cfx-upload-'))
+  const absoluteZipPath = path.resolve(zipPath)
+
+  try {
+    execSync(`unzip -o "${absoluteZipPath}" -d "${tempDir}"`, {
+      stdio: 'pipe'
+    })
+
+    const manifestPath = path.join(tempDir, zipManifestPath)
+    const content = fs.readFileSync(manifestPath, 'utf8')
+    fs.writeFileSync(manifestPath, setManifestVersion(content, version))
+    execSync(`cd "${tempDir}" && zip -qr "${absoluteZipPath}" .`, {
+      stdio: 'pipe'
+    })
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
+}
+
+export function syncUploadVersion(
+  uploadPath: string,
+  versionManifestPath: string,
+  zipManifestPath: string
+): string {
+  const shortSha = getShortSha()
+  const rawVersion = readManifestVersion(versionManifestPath)
+  const uploadVersion = buildUploadVersion(rawVersion, shortSha)
+
+  core.info(`Upload version: ${uploadVersion}`)
+
+  if (uploadPath.endsWith('.zip')) {
+    patchZipManifest(path.resolve(uploadPath), zipManifestPath, uploadVersion)
+    return uploadVersion
+  }
+
+  const manifestFullPath = path.join(getWorkspace(), versionManifestPath)
+  const content = fs.readFileSync(manifestFullPath, 'utf8')
+  fs.writeFileSync(
+    manifestFullPath,
+    setManifestVersion(content, uploadVersion)
+  )
+
+  return uploadVersion
+}
+
+export function resolveChangelog(input: string): string {
+  if (input) {
+    return input
+  }
+
+  const sha = getShortSha()
+  return sha ? `Build ${sha}` : 'Automated upload'
 }

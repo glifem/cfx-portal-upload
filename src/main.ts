@@ -12,7 +12,10 @@ import {
   getEnv,
   getUrl,
   preparePuppeteer,
-  zipAsset
+  zipAsset,
+  syncUploadVersion,
+  resolveChangelog,
+  getShortSha
 } from './utils'
 import { Readable } from 'stream'
 
@@ -107,7 +110,34 @@ export async function run(): Promise<void> {
       }
 
       uploadPath = await getUploadPath(assetName, uploadPath, makeZip)
-      await uploadFile(uploadPath, assetId, chunkSize, cookies)
+
+      const versionManifestPath = core.getInput('versionManifestPath')
+      const zipManifestPath = core.getInput('zipManifestPath') || 'fxmanifest.lua'
+      const explicitVersion = core.getInput('version')
+      const changelog = resolveChangelog(core.getInput('changelog'))
+      const releaseCandidate =
+        core.getInput('releaseCandidate').toLowerCase() === 'true'
+
+      let uploadVersion = explicitVersion
+      if (versionManifestPath) {
+        uploadVersion = syncUploadVersion(
+          uploadPath,
+          versionManifestPath,
+          zipManifestPath
+        )
+      } else if (!uploadVersion) {
+        uploadVersion = getShortSha()
+      }
+
+      await uploadFile(
+        uploadPath,
+        assetId,
+        chunkSize,
+        cookies,
+        uploadVersion,
+        changelog,
+        releaseCandidate
+      )
 
       if (shouldDownload) {
         await waitForAssetReady(assetId, cookies, 60000, 5000, assetName)
@@ -267,7 +297,10 @@ async function startReupload(
   uploadPath: string,
   assetId: string,
   chunkSize: number,
-  cookies: string
+  cookies: string,
+  version: string,
+  changelog: string,
+  releaseCandidate: boolean
 ): Promise<string> {
   const stats = statSync(uploadPath)
   const totalSize = stats.size
@@ -289,9 +322,9 @@ async function startReupload(
       name: basename(originalFileName, extname(originalFileName)),
       original_file_name: originalFileName,
       total_size: totalSize,
-      release_candidate: false,
-      version: '1.0.0',
-      changelog: 'sdasadsad'
+      release_candidate: releaseCandidate,
+      version,
+      changelog
     },
     {
       headers: {
@@ -334,9 +367,20 @@ async function uploadFile(
   uploadPath: string,
   assetId: string,
   chunkSize: number,
-  cookies: string
+  cookies: string,
+  version: string,
+  changelog: string,
+  releaseCandidate: boolean
 ): Promise<void> {
-  const versionId = await startReupload(uploadPath, assetId, chunkSize, cookies)
+  const versionId = await startReupload(
+    uploadPath,
+    assetId,
+    chunkSize,
+    cookies,
+    version,
+    changelog,
+    releaseCandidate
+  )
 
   let chunkIndex = 0
 

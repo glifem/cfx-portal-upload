@@ -55,6 +55,28 @@ inputs:
       'Download the asset from the cfx portal. Defaults to false if not provided'
     required: false
     default: false
+  versionManifestPath:
+    description:
+      'Path to fxmanifest.lua used to resolve the upload version (base + commit
+      sha)'
+    required: false
+  zipManifestPath:
+    description:
+      'Path to fxmanifest.lua inside the upload zip. Defaults to
+      fxmanifest.lua'
+    required: false
+    default: fxmanifest.lua
+  version:
+    description:
+      'Explicit upload version. Ignored when versionManifestPath is set'
+    required: false
+  changelog:
+    description: 'Upload changelog. Defaults to Build {commit sha}'
+    required: false
+  releaseCandidate:
+    description: 'Mark upload as release candidate (true or false)'
+    required: false
+    default: false
 
 runs:
   using: node20

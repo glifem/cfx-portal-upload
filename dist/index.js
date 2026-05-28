@@ -296176,7 +296176,19 @@ async function run() {
                 assetId = await (0, utils_1.resolveAssetId)(assetName, cookies);
             }
             uploadPath = await getUploadPath(assetName, uploadPath, makeZip);
-            await uploadFile(uploadPath, assetId, chunkSize, cookies);
+            const versionManifestPath = core.getInput('versionManifestPath');
+            const zipManifestPath = core.getInput('zipManifestPath') || 'fxmanifest.lua';
+            const explicitVersion = core.getInput('version');
+            const changelog = (0, utils_1.resolveChangelog)(core.getInput('changelog'));
+            const releaseCandidate = core.getInput('releaseCandidate').toLowerCase() === 'true';
+            let uploadVersion = explicitVersion;
+            if (versionManifestPath) {
+                uploadVersion = (0, utils_1.syncUploadVersion)(uploadPath, versionManifestPath, zipManifestPath);
+            }
+            else if (!uploadVersion) {
+                uploadVersion = (0, utils_1.getShortSha)();
+            }
+            await uploadFile(uploadPath, assetId, chunkSize, cookies, uploadVersion, changelog, releaseCandidate);
             if (shouldDownload) {
                 await waitForAssetReady(assetId, cookies, 60000, 5000, assetName);
                 await downloadAsset(assetId, cookies, downloadPath);
@@ -296298,7 +296310,7 @@ async function getUploadPath(assetName, uploadPath, makeZip) {
  * @returns {Promise<string>} Resolves with the new version id.
  * @throws If the re-upload fails due to errors in the response.
  */
-async function startReupload(uploadPath, assetId, chunkSize, cookies) {
+async function startReupload(uploadPath, assetId, chunkSize, cookies, version, changelog, releaseCandidate) {
     const stats = (0, fs_1.statSync)(uploadPath);
     const totalSize = stats.size;
     const originalFileName = (0, path_1.basename)(uploadPath);
@@ -296314,9 +296326,9 @@ async function startReupload(uploadPath, assetId, chunkSize, cookies) {
         name: (0, path_1.basename)(originalFileName, (0, path_1.extname)(originalFileName)),
         original_file_name: originalFileName,
         total_size: totalSize,
-        release_candidate: false,
-        version: '1.0.0',
-        changelog: 'sdasadsad'
+        release_candidate: releaseCandidate,
+        version,
+        changelog
     }, {
         headers: {
             ...(0, utils_1.getBrowserHeaders)(),
@@ -296345,8 +296357,8 @@ async function startReupload(uploadPath, assetId, chunkSize, cookies) {
  * @returns {Promise<void>} Resolves when the upload is complete.
  * @throws If the upload fails at any stage.
  */
-async function uploadFile(uploadPath, assetId, chunkSize, cookies) {
-    const versionId = await startReupload(uploadPath, assetId, chunkSize, cookies);
+async function uploadFile(uploadPath, assetId, chunkSize, cookies, version, changelog, releaseCandidate) {
+    const versionId = await startReupload(uploadPath, assetId, chunkSize, cookies, version, changelog, releaseCandidate);
     let chunkIndex = 0;
     const stats = (0, fs_1.statSync)(uploadPath);
     const totalSize = stats.size;
@@ -296588,13 +296600,24 @@ exports.getBrowserHeaders = getBrowserHeaders;
 exports.getEnv = getEnv;
 exports.zipAsset = zipAsset;
 exports.deleteIfExists = deleteIfExists;
+exports.getShortSha = getShortSha;
+exports.parseManifestVersion = parseManifestVersion;
+exports.setManifestVersion = setManifestVersion;
+exports.resolveBaseVersion = resolveBaseVersion;
+exports.buildUploadVersion = buildUploadVersion;
+exports.readManifestVersion = readManifestVersion;
+exports.patchZipManifest = patchZipManifest;
+exports.syncUploadVersion = syncUploadVersion;
+exports.resolveChangelog = resolveChangelog;
 const browsers_1 = __nccwpck_require__(73403);
 const types_1 = __nccwpck_require__(38522);
 const os_1 = __nccwpck_require__(70857);
 const path_1 = __nccwpck_require__(16928);
+const child_process_1 = __nccwpck_require__(35317);
+const fs_1 = __nccwpck_require__(79896);
 const core = __importStar(__nccwpck_require__(37484));
 const axios_1 = __importDefault(__nccwpck_require__(87269));
-const fs_1 = __importDefault(__nccwpck_require__(79896));
+const fs_2 = __importDefault(__nccwpck_require__(79896));
 const path_2 = __importDefault(__nccwpck_require__(16928));
 const yazl_1 = __importDefault(__nccwpck_require__(93044));
 /**
@@ -296672,12 +296695,12 @@ function getBrowserHeaders() {
     };
 }
 function buildTree(currentPath) {
-    const stats = fs_1.default.statSync(currentPath);
+    const stats = fs_2.default.statSync(currentPath);
     if (stats.isFile()) {
         return path_2.default.basename(currentPath); // Return file name
     }
     if (stats.isDirectory()) {
-        const children = fs_1.default.readdirSync(currentPath);
+        const children = fs_2.default.readdirSync(currentPath);
         return {
             [path_2.default.basename(currentPath)]: children.map(child => buildTree(path_2.default.join(currentPath, child)))
         };
@@ -296696,7 +296719,7 @@ async function zipAsset(assetName) {
     const outputZipPath = assetName + '.zip';
     const zipfile = new yazl_1.default.ZipFile();
     function addDirectoryToZip(dir, zipPath) {
-        const entries = fs_1.default.readdirSync(dir, { withFileTypes: true });
+        const entries = fs_2.default.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
             const fullPath = path_2.default.join(dir, entry.name);
             const entryZipPath = path_2.default.join(zipPath, entry.name);
@@ -296714,7 +296737,7 @@ async function zipAsset(assetName) {
     addDirectoryToZip(workspacePath, assetName); // Use asset name as zip root folder
     core.debug('Zip content: ' + JSON.stringify(buildTree(workspacePath), null, 2));
     zipfile.end();
-    const outputStream = fs_1.default.createWriteStream(outputZipPath);
+    const outputStream = fs_2.default.createWriteStream(outputZipPath);
     return new Promise((resolve, reject) => {
         zipfile.outputStream
             .pipe(outputStream)
@@ -296726,16 +296749,16 @@ async function zipAsset(assetName) {
     });
 }
 function deleteIfExists(_path) {
-    _path = path_2.default.join(getEnv('GITHUB_WORKSPACE'), _path);
+    _path = path_2.default.join(getWorkspace(), _path);
     try {
-        if (fs_1.default.existsSync(_path)) {
+        if (fs_2.default.existsSync(_path)) {
             core.debug(`Deleting ${_path}...`);
-            const stats = fs_1.default.lstatSync(_path);
+            const stats = fs_2.default.lstatSync(_path);
             if (stats.isDirectory()) {
-                fs_1.default.rmSync(_path, { recursive: true, force: true });
+                fs_2.default.rmSync(_path, { recursive: true, force: true });
             }
             else if (stats.isFile()) {
-                fs_1.default.unlinkSync(_path);
+                fs_2.default.unlinkSync(_path);
             }
         }
         else {
@@ -296745,6 +296768,90 @@ function deleteIfExists(_path) {
     catch (error) {
         core.debug(`Skipping ${_path} deletion due to error: ${error}`);
     }
+}
+function getWorkspace() {
+    return process.env.GITHUB_WORKSPACE ?? process.cwd();
+}
+function getShortSha() {
+    const sha = process.env.GITHUB_SHA;
+    if (sha && sha.length >= 7) {
+        return sha.slice(0, 7);
+    }
+    return Date.now().toString(36);
+}
+function parseManifestVersion(content) {
+    const match = content.match(/^\s*version\s+['"]([^'"]+)['"]/m);
+    return match?.[1] ?? null;
+}
+function setManifestVersion(content, version) {
+    return content.replace(/^(\s*version\s+)(['"])([^'"]+)(['"])/m, `$1$2${version}$4`);
+}
+function resolveBaseVersion(raw, shortSha) {
+    let base = raw;
+    if (base.includes('__BUILD_VERSION__')) {
+        base = base.replace(/__BUILD_VERSION__/g, shortSha);
+    }
+    if (base.includes('{commit}')) {
+        base = base.replace(/\{commit\}/g, shortSha);
+    }
+    return base.replace(/-[0-9a-f]{7,40}$/i, '');
+}
+function buildUploadVersion(rawVersion, shortSha) {
+    const base = resolveBaseVersion(rawVersion, shortSha);
+    if (base.includes(shortSha)) {
+        return base;
+    }
+    return `${base}-${shortSha}`;
+}
+function readManifestVersion(manifestPath) {
+    const fullPath = path_2.default.isAbsolute(manifestPath)
+        ? manifestPath
+        : path_2.default.join(getWorkspace(), manifestPath);
+    const content = fs_2.default.readFileSync(fullPath, 'utf8');
+    const version = parseManifestVersion(content);
+    if (!version) {
+        throw new Error(`No version field in ${manifestPath}`);
+    }
+    return version;
+}
+function patchZipManifest(zipPath, zipManifestPath, version) {
+    const tempDir = (0, fs_1.mkdtempSync)((0, path_1.join)((0, os_1.tmpdir)(), 'cfx-upload-'));
+    const absoluteZipPath = path_2.default.resolve(zipPath);
+    try {
+        (0, child_process_1.execSync)(`unzip -o "${absoluteZipPath}" -d "${tempDir}"`, {
+            stdio: 'pipe'
+        });
+        const manifestPath = path_2.default.join(tempDir, zipManifestPath);
+        const content = fs_2.default.readFileSync(manifestPath, 'utf8');
+        fs_2.default.writeFileSync(manifestPath, setManifestVersion(content, version));
+        (0, child_process_1.execSync)(`cd "${tempDir}" && zip -qr "${absoluteZipPath}" .`, {
+            stdio: 'pipe'
+        });
+    }
+    finally {
+        fs_2.default.rmSync(tempDir, { recursive: true, force: true });
+    }
+}
+function syncUploadVersion(uploadPath, versionManifestPath, zipManifestPath) {
+    const shortSha = getShortSha();
+    const rawVersion = readManifestVersion(versionManifestPath);
+    const uploadVersion = buildUploadVersion(rawVersion, shortSha);
+    core.info(`Upload version: ${uploadVersion}`);
+    if (uploadPath.endsWith('.zip')) {
+        patchZipManifest(path_2.default.resolve(uploadPath), zipManifestPath, uploadVersion);
+        return uploadVersion;
+    }
+    const manifestFullPath = path_2.default.join(getWorkspace(), versionManifestPath);
+    const content = fs_2.default.readFileSync(manifestFullPath, 'utf8');
+    fs_2.default.writeFileSync(manifestFullPath, setManifestVersion(content, uploadVersion));
+    return uploadVersion;
+}
+function resolveChangelog(input) {
+    if (input) {
+        return input;
+    }
+    const sha = getShortSha();
+    return sha ? `Build ${sha}` : 'Automated upload';
 }
 
 
