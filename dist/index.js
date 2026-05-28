@@ -296311,9 +296311,12 @@ async function startReupload(uploadPath, assetId, chunkSize, cookies) {
     const reUploadReponse = await axios_1.default.post((0, utils_1.getUrl)('REUPLOAD', assetId), {
         chunk_count: chunkCount,
         chunk_size: chunkSize,
-        name: originalFileName,
+        name: (0, path_1.basename)(originalFileName, (0, path_1.extname)(originalFileName)),
         original_file_name: originalFileName,
-        total_size: totalSize
+        total_size: totalSize,
+        release_candidate: false,
+        version: '1.0.0',
+        changelog: 'sdasadsad'
     }, {
         headers: {
             ...(0, utils_1.getBrowserHeaders)(),

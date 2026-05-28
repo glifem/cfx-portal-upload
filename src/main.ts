@@ -288,7 +288,10 @@ async function startReupload(
       chunk_size: chunkSize,
       name: basename(originalFileName, extname(originalFileName)),
       original_file_name: originalFileName,
-      total_size: totalSize
+      total_size: totalSize,
+      release_candidate: false,
+      version: '1.0.0',
+      changelog: 'sdasadsad'
     },
     {
       headers: {
