@@ -296188,10 +296188,11 @@ async function run() {
             else if (!uploadVersion) {
                 uploadVersion = (0, utils_1.getShortSha)();
             }
-            await uploadFile(uploadPath, assetId, chunkSize, cookies, uploadVersion, changelog, releaseCandidate);
+            const versionId = await uploadFile(uploadPath, assetId, chunkSize, cookies, uploadVersion, changelog, releaseCandidate);
             if (shouldDownload) {
                 await waitForAssetReady(assetId, cookies, 60000, 5000, assetName);
                 await downloadAsset(assetId, cookies, downloadPath);
+                await deleteVersion(assetId, versionId, cookies);
             }
         }
         else {
@@ -296384,6 +296385,23 @@ async function uploadFile(uploadPath, assetId, chunkSize, cookies, version, chan
         chunkIndex++;
     }
     await completeUpload(assetId, versionId, cookies);
+    return versionId;
+}
+/**
+ * Deletes an asset version from the portal.
+ * @param assetId
+ * @param versionId
+ * @param cookies
+ * @returns {Promise<void>} Resolves when the version is deleted.
+ */
+async function deleteVersion(assetId, versionId, cookies) {
+    await axios_1.default.delete((0, utils_1.getUrl)('DELETE_VERSION', assetId, versionId), {
+        headers: {
+            ...(0, utils_1.getBrowserHeaders)(),
+            Cookie: cookies
+        }
+    });
+    core.info(`Deleted version ${versionId}.`);
 }
 /**
  * Completes the upload process.
@@ -296546,6 +296564,7 @@ var Urls;
     Urls["REUPLOAD"] = "assets/{id}/re-upload";
     Urls["UPLOAD_CHUNK"] = "assets/{id}/versions/{versionId}/upload-chunk";
     Urls["COMPLETE_UPLOAD"] = "assets/{id}/versions/{versionId}/complete-upload";
+    Urls["DELETE_VERSION"] = "assets/{id}/versions/{versionId}";
 })(Urls || (exports.Urls = Urls = {}));
 
 

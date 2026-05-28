@@ -129,7 +129,7 @@ export async function run(): Promise<void> {
         uploadVersion = getShortSha()
       }
 
-      await uploadFile(
+      const versionId = await uploadFile(
         uploadPath,
         assetId,
         chunkSize,
@@ -142,6 +142,7 @@ export async function run(): Promise<void> {
       if (shouldDownload) {
         await waitForAssetReady(assetId, cookies, 60000, 5000, assetName)
         await downloadAsset(assetId, cookies, downloadPath)
+        await deleteVersion(assetId, versionId, cookies)
       }
     } else {
       throw new Error(
@@ -371,7 +372,7 @@ async function uploadFile(
   version: string,
   changelog: string,
   releaseCandidate: boolean
-): Promise<void> {
+): Promise<string> {
   const versionId = await startReupload(
     uploadPath,
     assetId,
@@ -414,6 +415,29 @@ async function uploadFile(
   }
 
   await completeUpload(assetId, versionId, cookies)
+  return versionId
+}
+
+/**
+ * Deletes an asset version from the portal.
+ * @param assetId
+ * @param versionId
+ * @param cookies
+ * @returns {Promise<void>} Resolves when the version is deleted.
+ */
+async function deleteVersion(
+  assetId: string,
+  versionId: string,
+  cookies: string
+): Promise<void> {
+  await axios.delete(getUrl('DELETE_VERSION', assetId, versionId), {
+    headers: {
+      ...getBrowserHeaders(),
+      Cookie: cookies
+    }
+  })
+
+  core.info(`Deleted version ${versionId}.`)
 }
 
 /**

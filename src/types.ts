@@ -22,5 +22,6 @@ export enum Urls {
   SSO = 'auth/discourse?return=',
   REUPLOAD = 'assets/{id}/re-upload',
   UPLOAD_CHUNK = 'assets/{id}/versions/{versionId}/upload-chunk',
-  COMPLETE_UPLOAD = 'assets/{id}/versions/{versionId}/complete-upload'
+  COMPLETE_UPLOAD = 'assets/{id}/versions/{versionId}/complete-upload',
+  DELETE_VERSION = 'assets/{id}/versions/{versionId}'
 }
