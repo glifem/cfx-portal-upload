@@ -45,6 +45,14 @@ interface AssetResponse {
   items: Asset[]
 }
 
+const ASSET_READY_TIMEOUT_MS = 30 * 60 * 1000
+
+interface UploadedVersion {
+  assetId: string
+  versionId: string
+  cookies: string
+}
+
 /**
  * The main function for the action.
  * @returns {Promise<void>} Resolves when the action is complete.
@@ -58,6 +66,7 @@ export async function run(): Promise<void> {
   })
 
   const page = await browser.newPage()
+  let versionToCleanup: UploadedVersion | null = null
 
   try {
     let assetId = core.getInput('assetId')
@@ -140,9 +149,23 @@ export async function run(): Promise<void> {
       )
 
       if (shouldDownload) {
-        await waitForAssetReady(assetId, cookies, 60000, 5000, assetName)
-        await downloadAsset(assetId, cookies, downloadPath)
-        await deleteVersion(assetId, versionId, cookies)
+        versionToCleanup = { assetId, versionId, cookies }
+        try {
+          await waitForAssetReady(
+            assetId,
+            cookies,
+            ASSET_READY_TIMEOUT_MS,
+            5000,
+            assetName
+          )
+          await downloadAsset(assetId, cookies, downloadPath)
+          await deleteVersion(assetId, versionId, cookies)
+          versionToCleanup = null
+        } catch (error) {
+          await cleanupUploadedVersion(versionToCleanup)
+          versionToCleanup = null
+          throw error
+        }
       }
     } else {
       throw new Error(
@@ -150,6 +173,10 @@ export async function run(): Promise<void> {
       )
     }
   } catch (error) {
+    if (versionToCleanup) {
+      await cleanupUploadedVersion(versionToCleanup)
+      versionToCleanup = null
+    }
     if (error instanceof Error) {
       core.setFailed(error.message)
     }
@@ -383,39 +410,44 @@ async function uploadFile(
     releaseCandidate
   )
 
-  let chunkIndex = 0
+  try {
+    let chunkIndex = 0
 
-  const stats = statSync(uploadPath)
-  const totalSize = stats.size
-  const chunkCount = Math.ceil(totalSize / chunkSize)
+    const stats = statSync(uploadPath)
+    const totalSize = stats.size
+    const chunkCount = Math.ceil(totalSize / chunkSize)
 
-  const stream = createReadStream(uploadPath, { highWaterMark: chunkSize })
+    const stream = createReadStream(uploadPath, { highWaterMark: chunkSize })
 
-  for await (const chunk of stream) {
-    const form = new FormData()
-    form.append('chunk_id', chunkIndex)
-    form.append('chunk', chunk, {
-      filename: 'blob',
-      contentType: 'application/octet-stream'
-    })
+    for await (const chunk of stream) {
+      const form = new FormData()
+      form.append('chunk_id', chunkIndex)
+      form.append('chunk', chunk, {
+        filename: 'blob',
+        contentType: 'application/octet-stream'
+      })
 
-    await axios.post(getUrl('UPLOAD_CHUNK', assetId, versionId), form, {
-      headers: {
-        ...getBrowserHeaders(),
-        ...form.getHeaders(),
-        Cookie: cookies
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity
-    })
+      await axios.post(getUrl('UPLOAD_CHUNK', assetId, versionId), form, {
+        headers: {
+          ...getBrowserHeaders(),
+          ...form.getHeaders(),
+          Cookie: cookies
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity
+      })
 
-    core.info(`Uploaded chunk ${chunkIndex + 1}/${chunkCount}`)
+      core.info(`Uploaded chunk ${chunkIndex + 1}/${chunkCount}`)
 
-    chunkIndex++
+      chunkIndex++
+    }
+
+    await completeUpload(assetId, versionId, cookies)
+    return versionId
+  } catch (error) {
+    await cleanupUploadedVersion({ assetId, versionId, cookies })
+    throw error
   }
-
-  await completeUpload(assetId, versionId, cookies)
-  return versionId
 }
 
 /**
@@ -438,6 +470,27 @@ async function deleteVersion(
   })
 
   core.info(`Deleted version ${versionId}.`)
+}
+
+async function cleanupUploadedVersion(
+  uploaded: UploadedVersion | null
+): Promise<void> {
+  if (!uploaded) {
+    return
+  }
+
+  try {
+    await deleteVersion(
+      uploaded.assetId,
+      uploaded.versionId,
+      uploaded.cookies
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    core.warning(
+      `Failed to delete version ${uploaded.versionId} after job failure: ${message}`
+    )
+  }
 }
 
 /**
@@ -482,7 +535,7 @@ async function completeUpload(
 async function waitForAssetReady(
   assetId: string,
   cookies: string,
-  timeout = 60000,
+  timeout = ASSET_READY_TIMEOUT_MS,
   interval = 5000,
   assetName?: string
 ): Promise<void> {
