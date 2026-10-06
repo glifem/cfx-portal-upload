@@ -296127,19 +296127,36 @@ const axios_1 = __importDefault(__nccwpck_require__(87269));
 const fs_1 = __nccwpck_require__(79896);
 const path_1 = __nccwpck_require__(16928);
 const utils_1 = __nccwpck_require__(71798);
+const stream_1 = __nccwpck_require__(2203);
 const ASSET_READY_TIMEOUT_MS = 30 * 60 * 1000;
+const VERSION_ACTIVE_TIMEOUT_MS = 10 * 60 * 1000;
+/**
+ * The version uploaded by this run that is not meant to stay on the portal:
+ * set as soon as the portal hands out its id, cleared once it is deleted (or
+ * kept, when nothing is downloaded).
+ */
+let versionToCleanup = null;
 /**
  * The main function for the action.
  * @returns {Promise<void>} Resolves when the action is complete.
  */
 async function run() {
     await (0, utils_1.preparePuppeteer)();
+    // Puppeteer's own signal handlers exit at once, which left the uploaded
+    // version on the portal when a job was cancelled (next run: 409).
     const browser = await puppeteer_1.default.launch({
         headless: true,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
-    let versionToCleanup = null;
+    const onCancel = (signal) => {
+        void cancelRun(browser, signal);
+    };
+    process.once('SIGINT', onCancel);
+    process.once('SIGTERM', onCancel);
     try {
         let assetId = core.getInput('assetId');
         let assetName = core.getInput('assetName');
@@ -296192,35 +296209,62 @@ async function run() {
             }
             const versionId = await uploadFile(uploadPath, assetId, chunkSize, cookies, uploadVersion, changelog, releaseCandidate);
             if (shouldDownload) {
-                versionToCleanup = { assetId, versionId, cookies };
-                try {
-                    await waitForAssetReady(assetId, cookies, ASSET_READY_TIMEOUT_MS, 5000, assetName);
-                    await downloadAsset(assetId, cookies, downloadPath);
-                    await deleteVersion(assetId, versionId, cookies);
-                    versionToCleanup = null;
-                }
-                catch (error) {
-                    await cleanupUploadedVersion(versionToCleanup);
-                    versionToCleanup = null;
-                    throw error;
-                }
+                await waitForAssetReady(assetId, cookies, ASSET_READY_TIMEOUT_MS, 5000, assetName);
+                await downloadAsset(assetId, versionId, cookies, downloadPath);
+                await deleteVersion(assetId, versionId, cookies);
             }
+            versionToCleanup = null;
         }
         else {
             throw new Error('Redirect failed. Make sure the provided Cookie is valid.');
         }
     }
     catch (error) {
-        if (versionToCleanup) {
-            await cleanupUploadedVersion(versionToCleanup);
-            versionToCleanup = null;
-        }
-        if (error instanceof Error) {
-            core.setFailed(error.message);
-        }
+        await cleanupUploadedVersion();
+        core.setFailed(describeError(error));
     }
     finally {
+        process.removeListener('SIGINT', onCancel);
+        process.removeListener('SIGTERM', onCancel);
         await browser.close();
+    }
+}
+/**
+ * Deletes the version uploaded by this run when the job is cancelled. The
+ * runner sends SIGINT, then SIGTERM 7.5 s later, then kills the process.
+ * @param browser
+ * @param signal
+ */
+async function cancelRun(browser, signal) {
+    core.warning(`Received ${signal}. Deleting the uploaded version ...`);
+    await cleanupUploadedVersion();
+    browser.process()?.kill('SIGKILL');
+    process.exit(1);
+}
+/**
+ * Formats an error for the job log, with the portal's response body when
+ * there is one (axios only reports the status code).
+ * @param error
+ * @returns {string} The error message.
+ */
+function describeError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!axios_1.default.isAxiosError(error) || !error.response) {
+        return message;
+    }
+    const data = error.response.data;
+    if (data === undefined || data === null || data === '') {
+        return message;
+    }
+    if (data instanceof stream_1.Readable) {
+        return message;
+    }
+    try {
+        const body = typeof data === 'string' ? data : JSON.stringify(data);
+        return `${message}: ${body.slice(0, 1000)}`;
+    }
+    catch {
+        return message;
     }
 }
 /**
@@ -296331,12 +296375,14 @@ async function startReupload(uploadPath, assetId, chunkSize, cookies, version, c
     const totalSize = stats.size;
     const originalFileName = (0, path_1.basename)(uploadPath);
     const chunkCount = Math.ceil(totalSize / chunkSize);
+    const versions = await getAssetVersions(assetId, cookies);
+    core.info(`Asset ${assetId} has ${versions.length} version(s): ${formatVersions(versions)}`);
     core.info('Starting upload ...');
     core.debug(`Total size: ${totalSize}`);
     core.debug(`Original file name: ${originalFileName}`);
     core.debug(`Chunk size: ${chunkSize}`);
     core.debug(`Chunk count: ${chunkCount}`);
-    const reUploadReponse = await axios_1.default.post((0, utils_1.getUrl)('REUPLOAD', assetId), {
+    const postReupload = async () => axios_1.default.post((0, utils_1.getUrl)('REUPLOAD', assetId), {
         chunk_count: chunkCount,
         chunk_size: chunkSize,
         name: (0, path_1.basename)(originalFileName, (0, path_1.extname)(originalFileName)),
@@ -296352,6 +296398,22 @@ async function startReupload(uploadPath, assetId, chunkSize, cookies, version, c
             Cookie: cookies
         }
     });
+    let reUploadReponse;
+    try {
+        reUploadReponse = await postReupload();
+    }
+    catch (error) {
+        if (!axios_1.default.isAxiosError(error) || error.response?.status !== 409) {
+            throw error;
+        }
+        core.warning(`Portal refused version ${version}: ${describeError(error)}`);
+        const removed = await deleteStaleVersions(assetId, version, cookies);
+        if (removed === 0) {
+            throw error;
+        }
+        core.info('Retrying upload ...');
+        reUploadReponse = await postReupload();
+    }
     if (reUploadReponse.data.errors !== null) {
         core.debug(JSON.stringify(reUploadReponse.data.errors));
         throw new Error('Failed to re-upload file. See debug logs for more information.');
@@ -296375,38 +296437,33 @@ async function startReupload(uploadPath, assetId, chunkSize, cookies, version, c
  */
 async function uploadFile(uploadPath, assetId, chunkSize, cookies, version, changelog, releaseCandidate) {
     const versionId = await startReupload(uploadPath, assetId, chunkSize, cookies, version, changelog, releaseCandidate);
-    try {
-        let chunkIndex = 0;
-        const stats = (0, fs_1.statSync)(uploadPath);
-        const totalSize = stats.size;
-        const chunkCount = Math.ceil(totalSize / chunkSize);
-        const stream = (0, fs_1.createReadStream)(uploadPath, { highWaterMark: chunkSize });
-        for await (const chunk of stream) {
-            const form = new form_data_1.default();
-            form.append('chunk_id', chunkIndex);
-            form.append('chunk', chunk, {
-                filename: 'blob',
-                contentType: 'application/octet-stream'
-            });
-            await axios_1.default.post((0, utils_1.getUrl)('UPLOAD_CHUNK', assetId, versionId), form, {
-                headers: {
-                    ...(0, utils_1.getBrowserHeaders)(),
-                    ...form.getHeaders(),
-                    Cookie: cookies
-                },
-                maxBodyLength: Infinity,
-                maxContentLength: Infinity
-            });
-            core.info(`Uploaded chunk ${chunkIndex + 1}/${chunkCount}`);
-            chunkIndex++;
-        }
-        await completeUpload(assetId, versionId, cookies);
-        return versionId;
+    versionToCleanup = { assetId, versionId, cookies };
+    let chunkIndex = 0;
+    const stats = (0, fs_1.statSync)(uploadPath);
+    const totalSize = stats.size;
+    const chunkCount = Math.ceil(totalSize / chunkSize);
+    const stream = (0, fs_1.createReadStream)(uploadPath, { highWaterMark: chunkSize });
+    for await (const chunk of stream) {
+        const form = new form_data_1.default();
+        form.append('chunk_id', chunkIndex);
+        form.append('chunk', chunk, {
+            filename: 'blob',
+            contentType: 'application/octet-stream'
+        });
+        await axios_1.default.post((0, utils_1.getUrl)('UPLOAD_CHUNK', assetId, versionId), form, {
+            headers: {
+                ...(0, utils_1.getBrowserHeaders)(),
+                ...form.getHeaders(),
+                Cookie: cookies
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity
+        });
+        core.info(`Uploaded chunk ${chunkIndex + 1}/${chunkCount}`);
+        chunkIndex++;
     }
-    catch (error) {
-        await cleanupUploadedVersion({ assetId, versionId, cookies });
-        throw error;
-    }
+    await completeUpload(assetId, versionId, cookies);
+    return versionId;
 }
 /**
  * Deletes an asset version from the portal.
@@ -296424,7 +296481,9 @@ async function deleteVersion(assetId, versionId, cookies) {
     });
     core.info(`Deleted version ${versionId}.`);
 }
-async function cleanupUploadedVersion(uploaded) {
+async function cleanupUploadedVersion() {
+    const uploaded = versionToCleanup;
+    versionToCleanup = null;
     if (!uploaded) {
         return;
     }
@@ -296432,9 +296491,54 @@ async function cleanupUploadedVersion(uploaded) {
         await deleteVersion(uploaded.assetId, uploaded.versionId, uploaded.cookies);
     }
     catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        core.warning(`Failed to delete version ${uploaded.versionId} after job failure: ${message}`);
+        core.warning(`Failed to delete version ${uploaded.versionId} after job failure: ${describeError(error)}`);
     }
+}
+/**
+ * Lists the versions of an asset.
+ * @param assetId
+ * @param cookies
+ * @returns {Promise<AssetVersion[]>} The asset versions.
+ */
+async function getAssetVersions(assetId, cookies) {
+    const response = await axios_1.default.get((0, utils_1.getUrl)('ASSET_DETAIL', assetId), {
+        headers: {
+            Cookie: cookies
+        },
+        responseType: 'json'
+    });
+    return response.data.versions ?? [];
+}
+/**
+ * Formats asset versions for the job log.
+ * @param versions
+ * @returns {string} One entry per version.
+ */
+function formatVersions(versions) {
+    return versions
+        .map(v => `${v.id} ${v.version ?? '?'} (${v.state}${v.created_at ? `, ${v.created_at}` : ''}${v.changelog ? `, "${v.changelog}"` : ''})`)
+        .join('; ');
+}
+/**
+ * Deletes the versions named like the one being uploaded. Such a version was
+ * left by an earlier run that stopped before deleting its upload, and it
+ * takes a slot of the asset (409 MAX_VERSIONS_REACHED once full).
+ * @param assetId
+ * @param version
+ * @param cookies
+ * @returns {Promise<number>} The number of deleted versions.
+ */
+async function deleteStaleVersions(assetId, version, cookies) {
+    const versions = await getAssetVersions(assetId, cookies);
+    const stale = versions.filter(v => v.version === version);
+    if (stale.length === 0) {
+        core.info(`No version named ${version} on asset ${assetId}. Versions: ${formatVersions(versions)}`);
+    }
+    for (const v of stale) {
+        core.info(`Deleting version ${v.id} (${version}, ${v.state}) left by an earlier run ...`);
+        await deleteVersion(assetId, String(v.id), cookies);
+    }
+    return stale.length;
 }
 /**
  * Completes the upload process.
@@ -296525,34 +296629,44 @@ async function waitForAssetReady(assetId, cookies, timeout = ASSET_READY_TIMEOUT
     throw new Error('Asset was not ready for download within the specified timeout.');
 }
 /**
- * Downloads the asset file from the portal.
+ * Polls the asset versions until the given version is active.
  * @param assetId
+ * @param versionId
+ * @param cookies
+ * @param timeout Time in milliseconds to wait for the version.
+ * @param interval Polling interval in milliseconds.
+ * @returns {Promise<AssetVersion>} The active version.
+ * @throws If the version is gone or not active within the timeout.
+ */
+async function waitForVersionActive(assetId, versionId, cookies, timeout = VERSION_ACTIVE_TIMEOUT_MS, interval = 5000) {
+    const startTime = Date.now();
+    for (;;) {
+        const version = (await getAssetVersions(assetId, cookies)).find(v => String(v.id) === versionId);
+        if (!version) {
+            throw new Error(`Version ${versionId} is no longer on the portal.`);
+        }
+        if (version.state === 'active' && version.packs?.length > 0) {
+            return version;
+        }
+        if (Date.now() - startTime >= timeout) {
+            throw new Error(`Version ${versionId} was not active within the timeout (state: ${version.state}).`);
+        }
+        core.info(`Version ${versionId} is ${version.state}. Waiting...`);
+        await new Promise(resolve => setTimeout(resolve, interval));
+    }
+}
+/**
+ * Downloads the version uploaded by this run (not just any active one: a
+ * version left by an earlier run would be another build).
+ * @param assetId
+ * @param versionId
  * @param cookies
  * @param downloadPath The file path where the asset will be saved.
  * @returns {Promise<void>} Resolves when the download is complete.
  */
-async function downloadAsset(assetId, cookies, downloadPath) {
-    // First, get the real URL from the portal.
-    const portalAssetData = `https://portal-api.cfx.re/v1/assets/${assetId}`;
-    core.info(`Fetching asset data for version ID and pack ID from ${portalAssetData} ...`);
-    const initialResponse = await axios_1.default.get(portalAssetData, {
-        headers: {
-            Cookie: cookies
-        },
-        responseType: 'json'
-    });
-    const assetVersions = initialResponse.data.versions;
-    core.info('Identifying active asset version ...');
-    let activeVersion;
-    for (const version of assetVersions) {
-        if (version.state === 'active') {
-            activeVersion = version;
-            break;
-        }
-    }
-    if (!activeVersion) {
-        throw new Error('No active asset version found');
-    }
+async function downloadAsset(assetId, versionId, cookies, downloadPath) {
+    core.info(`Waiting for version ${versionId} to be active ...`);
+    const activeVersion = await waitForVersionActive(assetId, versionId, cookies);
     core.info('Grabbing asset version pack ID ...');
     const packId = activeVersion.packs[0].id;
     const portalDownloadUrl = `https://portal-api.cfx.re/v1/assets/${assetId}/versions/${activeVersion.id}/packs/${packId}/download`;
@@ -296597,6 +296711,7 @@ var Urls;
     Urls["REUPLOAD"] = "assets/{id}/re-upload";
     Urls["UPLOAD_CHUNK"] = "assets/{id}/versions/{versionId}/upload-chunk";
     Urls["COMPLETE_UPLOAD"] = "assets/{id}/versions/{versionId}/complete-upload";
+    Urls["ASSET_DETAIL"] = "assets/{id}";
     Urls["DELETE_VERSION"] = "assets/{id}/versions/{versionId}";
 })(Urls || (exports.Urls = Urls = {}));
 

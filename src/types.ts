@@ -23,5 +23,6 @@ export enum Urls {
   REUPLOAD = 'assets/{id}/re-upload',
   UPLOAD_CHUNK = 'assets/{id}/versions/{versionId}/upload-chunk',
   COMPLETE_UPLOAD = 'assets/{id}/versions/{versionId}/complete-upload',
+  ASSET_DETAIL = 'assets/{id}',
   DELETE_VERSION = 'assets/{id}/versions/{versionId}'
 }
